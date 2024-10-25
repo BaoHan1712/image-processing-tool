@@ -30,7 +30,7 @@ Là một phương pháp trong xử lý ảnh dùng để tính toán khoảng c
 
 cv2.distanceTransform(binary_image, cv2.DIST_L2, 5)
 
-![Euclidean](data/euclidean.png)
+![Euclidean](euclidean.png)
 
 Cuối dùng cv2.watershed để phân đoạn vật thể
 
