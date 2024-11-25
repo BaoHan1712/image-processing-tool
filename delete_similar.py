@@ -3,39 +3,83 @@ import cv2
 import numpy as np
 from pathlib import Path
 from PIL import Image
-from imagehash import average_hash
+from imagehash import average_hash, phash, dhash
+import itertools
 
-def get_image_hash(image_path):
-    """Tính toán hash của ảnh sử dụng average hash"""
+def get_image_hashes(image_path):
+    """Tính toán nhiều loại hash của ảnh để so sánh chính xác hơn"""
     try:
-        return str(average_hash(Image.open(image_path)))
+        img = Image.open(image_path)
+        # Kết hợp 3 loại hash để tăng độ chính xác
+        return {
+            'average': str(average_hash(img, hash_size=16)),
+            'phash': str(phash(img, hash_size=16)),
+            'dhash': str(dhash(img, hash_size=16))
+        }
     except Exception as e:
         print(f"Lỗi khi xử lý ảnh {image_path}: {e}")
         return None
 
-def find_duplicate_images(folder_path):
-    """Tìm các ảnh giống nhau trong thư mục"""
-    hash_dict = {}
+def calculate_similarity(hash1, hash2):
+    """Tính độ tương đồng giữa hai hash"""
+    if not (hash1 and hash2):
+        return 0
+    
+    # Tính trung bình độ tương đồng của cả 3 loại hash
+    similarities = []
+    for hash_type in ['average', 'phash', 'dhash']:
+        h1 = int(hash1[hash_type], 16)
+        h2 = int(hash2[hash_type], 16)
+        # Tính số bit khác nhau
+        hamming_distance = bin(h1 ^ h2).count('1')
+        # Chuyển đổi thành phần trăm giống nhau
+        similarity = (256 - hamming_distance) / 256 * 100
+        similarities.append(similarity)
+    
+    return sum(similarities) / len(similarities)
+
+def find_similar_images(folder_path, similarity_threshold=85):
+    """Tìm các ảnh gần giống nhau trong thư mục"""
+    image_hashes = {}
+    similar_groups = []
     image_extensions = {'.jpg', '.jpeg', '.png', '.bmp'}
     
-    print("Đang quét tất cả ảnh...")
+    print("Đang quét và tính toán hash của tất cả ảnh...")
+    # Thu thập tất cả ảnh và hash
     for img_path in Path(folder_path).glob('*'):
         if img_path.suffix.lower() in image_extensions:
-            img_hash = get_image_hash(img_path)
-            if img_hash:
-                if img_hash in hash_dict:
-                    hash_dict[img_hash].append(img_path)
-                else:
-                    hash_dict[img_hash] = [img_path]
+            hashes = get_image_hashes(img_path)
+            if hashes:
+                image_hashes[img_path] = hashes
     
-    return {h: paths for h, paths in hash_dict.items() if len(paths) > 1}
+    print("Đang tìm ảnh tương tự...")
+    # So sánh từng cặp ảnh
+    processed_images = set()
+    for img1, img2 in itertools.combinations(image_hashes.keys(), 2):
+        if img1 not in processed_images:
+            current_group = []
+            similarity = calculate_similarity(image_hashes[img1], image_hashes[img2])
+            
+            if similarity >= similarity_threshold:
+                if not current_group:
+                    current_group.append(img1)
+                current_group.append(img2)
+                processed_images.add(img2)
+            
+            if current_group:
+                similar_groups.append(current_group)
+                processed_images.add(img1)
+    
+    return similar_groups
 
-def show_sample_duplicates(duplicates):
-    """Hiển thị một cặp ảnh mẫu từ nhóm ảnh trùng lặp đầu tiên"""
-    # Lấy nhóm ảnh đầu tiên
-    first_group = next(iter(duplicates.values()))
+def show_sample_similars(similar_groups):
+    """Hiển thị một cặp ảnh mẫu từ nhóm ảnh tương tự đầu tiên"""
+    if not similar_groups:
+        return None
+        
+    first_group = similar_groups[0]
     img_path1 = first_group[0]  # Ảnh gốc
-    img_path2 = first_group[1]  # Ảnh trùng đầu tiên
+    img_path2 = first_group[1]  # Ảnh tương tự đầu tiên
     
     img1 = cv2.imread(str(img_path1))
     img2 = cv2.imread(str(img_path2))
@@ -58,19 +102,19 @@ def show_sample_duplicates(duplicates):
     # Ghép 2 ảnh ngang nhau
     combined = np.hstack((img1, img2))
     
-    window_name = 'Ảnh mẫu - Nhấn c để xóa TẤT CẢ ảnh trùng lặp, phím khác để thoát'
+    window_name = 'Ảnh tương tự - Nhấn c để xóa TẤT CẢ ảnh tương tự, phím khác để thoát'
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
     cv2.imshow(window_name, combined)
     return cv2.waitKey(0) & 0xFF
 
-def delete_all_duplicates(duplicates):
-    """Xóa tất cả ảnh trùng lặp từ mọi nhóm"""
+def delete_all_similars(similar_groups):
+    """Xóa tất cả ảnh tương tự (giữ lại ảnh đầu tiên của mỗi nhóm)"""
     deleted_count = 0
-    for hash_value, paths in duplicates.items():
-        original = paths[0]  # Giữ lại ảnh đầu tiên
-        duplicates_to_remove = paths[1:]  # Xóa các ảnh còn lại
+    for group in similar_groups:
+        original = group[0]  # Giữ lại ảnh đầu tiên
+        similars_to_remove = group[1:]  # Xóa các ảnh còn lại
         
-        for img_path in duplicates_to_remove:
+        for img_path in similars_to_remove:
             try:
                 os.remove(img_path)
                 print(f"Đã xóa: {img_path.name}")
@@ -87,22 +131,22 @@ def main():
         print(f"Thư mục {folder_path} không tồn tại!")
         return
     
-    print("Đang tìm ảnh giống nhau...")
-    duplicates = find_duplicate_images(folder_path)
+    print("Đang tìm ảnh tương tự...")
+    similar_groups = find_similar_images(folder_path, similarity_threshold=85)
     
-    if not duplicates:
-        print("Không tìm thấy ảnh giống nhau!")
+    if not similar_groups:
+        print("Không tìm thấy ảnh tương tự!")
         return
     
-    # Tính tổng số ảnh trùng lặp
-    total_duplicates = sum(len(paths) - 1 for paths in duplicates.values())
-    print(f"\nTìm thấy {total_duplicates} ảnh trùng lặp trong {len(duplicates)} nhóm")
+    # Tính tổng số ảnh tương tự
+    total_similars = sum(len(group) - 1 for group in similar_groups)
+    print(f"\nTìm thấy {total_similars} ảnh tương tự trong {len(similar_groups)} nhóm")
     
     # Hiển thị một cặp ảnh mẫu và chờ xác nhận
-    if show_sample_duplicates(duplicates) == ord('c'):
-        print("\nĐang xóa tất cả ảnh trùng lặp...")
-        deleted_count = delete_all_duplicates(duplicates)
-        print(f"\nĐã xóa thành công {deleted_count} ảnh trùng lặp")
+    if show_sample_similars(similar_groups) == ord('c'):
+        print("\nĐang xóa tất cả ảnh tương tự...")
+        deleted_count = delete_all_similars(similar_groups)
+        print(f"\nĐã xóa thành công {deleted_count} ảnh tương tự")
     else:
         print("\nĐã hủy thao tác xóa")
     
